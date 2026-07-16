@@ -146,7 +146,52 @@ io.on("connection", (socket) => {
     });
   });
 
+  // ---------- Voice call signaling (WebRTC mesh) ----------
+  // The server never touches audio itself — it only relays signaling
+  // messages (offers/answers/ICE candidates) between the browsers, which
+  // then talk to each other directly over WebRTC peer connections.
+
+  socket.on("call-join", () => {
+    if (!currentRoom || !rooms[currentRoom]) return;
+    const room = rooms[currentRoom];
+    if (!room.callUsers) room.callUsers = {};
+
+    const existingParticipants = Object.entries(room.callUsers).map(([id, name]) => ({
+      socketId: id,
+      name,
+    }));
+
+    room.callUsers[socket.id] = nickname;
+
+    // Tell the joiner who's already in the call, so they can initiate connections
+    socket.emit("call-participants", { participants: existingParticipants });
+
+    // Tell existing call participants that someone new is available
+    socket.to(currentRoom).emit("call-user-joined", { socketId: socket.id, name: nickname });
+  });
+
+  socket.on("call-leave", () => {
+    leaveCall();
+  });
+
+  // Generic relay for WebRTC offers/answers/ICE candidates.
+  // `to` is a target socket id; Socket.io automatically puts every socket
+  // in a private room named after its own id, so io.to(to) reaches just them.
+  socket.on("webrtc-signal", ({ to, type, payload }) => {
+    if (!to || !type) return;
+    io.to(to).emit("webrtc-signal", { from: socket.id, type, payload });
+  });
+
+  function leaveCall() {
+    if (currentRoom && rooms[currentRoom] && rooms[currentRoom].callUsers && rooms[currentRoom].callUsers[socket.id] !== undefined) {
+      delete rooms[currentRoom].callUsers[socket.id];
+      socket.to(currentRoom).emit("call-user-left", { socketId: socket.id });
+    }
+  }
+
   socket.on("disconnect", () => {
+    leaveCall();
+
     if (currentRoom && rooms[currentRoom]) {
       delete rooms[currentRoom].users[socket.id];
       socket.to(currentRoom).emit("system-message", {

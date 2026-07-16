@@ -26,9 +26,24 @@
   const nameForm = document.getElementById("nameForm");
   const nameInput = document.getElementById("nameInput");
 
+  const callBtn = document.getElementById("callBtn");
+  const callBar = document.getElementById("callBar");
+  const callCountEl = document.getElementById("callCount");
+  const muteBtn = document.getElementById("muteBtn");
+  const muteIcon = document.getElementById("muteIcon");
+  const leaveCallBtn = document.getElementById("leaveCallBtn");
+  const remoteAudios = document.getElementById("remoteAudios");
+
   const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4MB raw file size cap
+  const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 
   let pendingImage = null; // { dataUrl }
+
+  // ---------- Voice call state ----------
+  let localStream = null;
+  let inCall = false;
+  let isMuted = false;
+  const peers = {}; // socketId -> { pc: RTCPeerConnection, audioEl: HTMLAudioElement }
 
   if (!roomCode || roomCode.length !== 5) {
     nameModal.classList.add("hidden");
@@ -126,6 +141,7 @@
     exitBtn.addEventListener("click", () => {
       // Name lives only in this page's memory (nameInput/socket state) — leaving
       // the page never persists it anywhere (no localStorage/cookies used).
+      if (inCall) leaveVoiceCall(socket);
       window.location.href = "/";
     });
 
@@ -164,6 +180,145 @@
       imagePreviewThumb.src = "";
       imagePreviewBar.classList.add("hidden");
     }
+
+    // ---------- Voice call flow ----------
+    socket.on("call-participants", ({ participants }) => {
+      // We just joined the call — connect out to everyone already in it
+      participants.forEach((p) => createPeerConnection(socket, p.socketId, true));
+      updateCallCount();
+    });
+
+    socket.on("call-user-joined", ({ socketId }) => {
+      // Someone new joined after us — they'll initiate the offer to us,
+      // we just need a peer connection ready to receive it
+      if (inCall) {
+        createPeerConnection(socket, socketId, false);
+        updateCallCount();
+      }
+    });
+
+    socket.on("call-user-left", ({ socketId }) => {
+      destroyPeerConnection(socketId);
+      updateCallCount();
+    });
+
+    socket.on("webrtc-signal", async ({ from, type, payload }) => {
+      const peer = peers[from] || createPeerConnection(socket, from, false);
+      const pc = peer.pc;
+
+      if (type === "offer") {
+        await pc.setRemoteDescription(new RTCSessionDescription(payload));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit("webrtc-signal", { to: from, type: "answer", payload: answer });
+      } else if (type === "answer") {
+        await pc.setRemoteDescription(new RTCSessionDescription(payload));
+      } else if (type === "candidate" && payload) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(payload));
+        } catch (err) {
+          // Ignore benign candidate errors (e.g. arriving after connection closed)
+        }
+      }
+    });
+
+    callBtn.addEventListener("click", async () => {
+      if (inCall) return;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        addSystemMessage("Couldn't access your microphone");
+        return;
+      }
+      inCall = true;
+      isMuted = false;
+      callBar.classList.remove("hidden");
+      callBar.classList.add("flex");
+      callBtn.classList.add("bg-accent", "border-accent");
+      callBtn.classList.remove("bg-surface2");
+      addSystemMessage("You joined the voice call");
+      socket.emit("call-join");
+      updateCallCount();
+    });
+
+    muteBtn.addEventListener("click", () => {
+      if (!localStream) return;
+      isMuted = !isMuted;
+      localStream.getAudioTracks().forEach((track) => (track.enabled = !isMuted));
+      muteBtn.classList.toggle("bg-ember", isMuted);
+      muteBtn.classList.toggle("border-ember", isMuted);
+      muteIcon.innerHTML = isMuted
+        ? '<path d="M1 1l22 22"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M19 10v2a7 7 0 0 1-.11 1.23M12 19v4M8 23h8"/>'
+        : '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>';
+    });
+
+    leaveCallBtn.addEventListener("click", () => leaveVoiceCall(socket));
+
+    function updateCallCount() {
+      callCountEl.textContent = Object.keys(peers).length + 1;
+    }
+  }
+
+  function createPeerConnection(socket, targetId, isInitiator) {
+    if (peers[targetId]) return peers[targetId];
+
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const audioEl = document.createElement("audio");
+    audioEl.autoplay = true;
+    remoteAudios.appendChild(audioEl);
+
+    peers[targetId] = { pc, audioEl };
+
+    if (localStream) {
+      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+    }
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        socket.emit("webrtc-signal", { to: targetId, type: "candidate", payload: e.candidate });
+      }
+    };
+
+    pc.ontrack = (e) => {
+      audioEl.srcObject = e.streams[0];
+    };
+
+    if (isInitiator) {
+      pc.onnegotiationneeded = async () => {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit("webrtc-signal", { to: targetId, type: "offer", payload: offer });
+      };
+    }
+
+    return peers[targetId];
+  }
+
+  function destroyPeerConnection(targetId) {
+    const peer = peers[targetId];
+    if (!peer) return;
+    peer.pc.close();
+    peer.audioEl.remove();
+    delete peers[targetId];
+  }
+
+  function leaveVoiceCall(socket) {
+    if (!inCall) return;
+    inCall = false;
+
+    Object.keys(peers).forEach(destroyPeerConnection);
+
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+      localStream = null;
+    }
+
+    socket.emit("call-leave");
+    callBar.classList.add("hidden");
+    callBar.classList.remove("flex");
+    callBtn.classList.remove("bg-accent", "border-accent");
+    callBtn.classList.add("bg-surface2");
+    addSystemMessage("You left the voice call");
   }
 
   function addSystemMessage(text) {
