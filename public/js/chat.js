@@ -21,33 +21,61 @@
   const imageViewer = document.getElementById("imageViewer");
   const imageViewerImg = document.getElementById("imageViewerImg");
 
+  const nameModal = document.getElementById("nameModal");
+  const modalRoomCode = document.getElementById("modalRoomCode");
+  const nameForm = document.getElementById("nameForm");
+  const nameInput = document.getElementById("nameInput");
+
   const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4MB raw file size cap
 
   let pendingImage = null; // { dataUrl }
 
   if (!roomCode || roomCode.length !== 5) {
+    nameModal.classList.add("hidden");
     notFoundOverlay.classList.remove("hidden");
   } else {
     roomCodeLabel.textContent = roomCode;
-    init();
+    modalRoomCode.textContent = roomCode;
+    initSocketAndAwaitName();
   }
 
-  function init() {
+  function initSocketAndAwaitName() {
     const socket = io();
+    let joined = false;
 
-    socket.on("connect", () => {
-      socket.emit("join-room", { roomCode });
+    // Autofocus the name field so people can just start typing
+    setTimeout(() => nameInput.focus(), 100);
+
+    nameForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const name = nameInput.value.trim().slice(0, 20);
+      const submitBtn = nameForm.querySelector("button[type=submit]");
+      submitBtn.disabled = true;
+
+      socket.emit("join-room", { roomCode, name });
     });
 
     socket.on("joined", ({ nickname, onlineCount }) => {
+      joined = true;
+      nameModal.classList.add("hidden");
       onlineCountEl.textContent = `${onlineCount} online`;
       addSystemMessage(`You joined as ${nickname}`);
+      wireChatUI(socket);
     });
 
-    socket.on("join-error", () => {
+    socket.on("join-error", ({ message }) => {
+      if (!joined) {
+        nameModal.classList.add("hidden");
+      }
       notFoundOverlay.classList.remove("hidden");
     });
 
+    socket.on("disconnect", () => {
+      if (joined) addSystemMessage("Connection lost, reconnecting...");
+    });
+  }
+
+  function wireChatUI(socket) {
     socket.on("system-message", ({ text, onlineCount }) => {
       addSystemMessage(text);
       if (typeof onlineCount === "number") {
@@ -62,10 +90,6 @@
 
     socket.on("image-error", ({ message }) => {
       addSystemMessage(message || "Image failed to send");
-    });
-
-    socket.on("disconnect", () => {
-      addSystemMessage("Connection lost, reconnecting...");
     });
 
     messageForm.addEventListener("submit", (e) => {
@@ -100,6 +124,8 @@
     });
 
     exitBtn.addEventListener("click", () => {
+      // Name lives only in this page's memory (nameInput/socket state) — leaving
+      // the page never persists it anywhere (no localStorage/cookies used).
       window.location.href = "/";
     });
 

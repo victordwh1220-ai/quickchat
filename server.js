@@ -85,7 +85,7 @@ io.on("connection", (socket) => {
   let currentRoom = null;
   let nickname = null;
 
-  socket.on("join-room", ({ roomCode }) => {
+  socket.on("join-room", ({ roomCode, name }) => {
     if (!/^\d{5}$/.test(roomCode)) {
       socket.emit("join-error", { message: "Room not found or has ended" });
       return;
@@ -96,8 +96,12 @@ io.on("connection", (socket) => {
       rooms[roomCode] = { users: {}, createdAt: Date.now() };
     }
 
+    // Sanitize the display name the user typed in the join modal. It's kept only
+    // in memory for the lifetime of this socket connection — never persisted.
+    const cleanName = (name || "").toString().trim().replace(/\s+/g, " ").slice(0, 20);
+
     currentRoom = roomCode;
-    nickname = generateNickname();
+    nickname = cleanName || generateNickname();
     rooms[roomCode].users[socket.id] = nickname;
 
     socket.join(roomCode);

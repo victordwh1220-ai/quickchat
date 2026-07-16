@@ -69,6 +69,7 @@
     .ember-dot { animation: none; }
     .fade-in { animation: none; }
   }
+  .btn-press:active { transform: scale(0.97); }
   .chat-image {
     max-width: 240px;
     max-height: 320px;
@@ -82,6 +83,31 @@
 </style>
 </head>
 <body class="font-body text-ink h-screen flex flex-col">
+
+  <!-- Name entry modal (shown before joining; name is never saved after leaving) -->
+  <div id="nameModal" class="fixed inset-0 z-50 flex items-center justify-center px-6 bg-bg/95 backdrop-blur">
+    <div class="w-full max-w-sm bg-surface border border-line rounded-3xl p-6">
+      <div class="flex items-center gap-2 mb-4">
+        <span class="w-1.5 h-1.5 rounded-full bg-ember ember-dot"></span>
+        <p class="text-[11px] uppercase tracking-[0.2em] text-muted font-mono">Room <span id="modalRoomCode">------</span></p>
+      </div>
+      <h2 class="font-display font-semibold text-2xl mb-2">What's your name?</h2>
+      <p class="text-muted text-sm mb-5">Only shown to people in this room. Not saved anywhere after you leave.</p>
+      <form id="nameForm" class="space-y-3">
+        <input
+          id="nameInput"
+          type="text"
+          maxlength="20"
+          placeholder="Your name"
+          autocomplete="off"
+          class="w-full bg-surface2 border border-line focus:border-accent2 outline-none text-ink text-base rounded-2xl px-4 py-3.5 placeholder:text-muted transition-colors"
+        />
+        <button type="submit" class="btn-press w-full bg-accent hover:bg-accent2 transition-colors duration-150 text-white font-medium text-base rounded-2xl py-3.5">
+          Join chat
+        </button>
+      </form>
+    </div>
+  </div>
 
   <!-- Top bar -->
   <header class="flex items-center justify-between px-5 py-4 border-b border-line bg-surface/70 backdrop-blur">
