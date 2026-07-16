@@ -1,7 +1,7 @@
 // server.js
-// QuickChat - 极简一次性聊天室后端
-// Express 负责静态文件与路由，Socket.io 负责实时消息
-// 所有房间与消息数据只存在于内存中，服务器重启即清空（符合"一次性"特性）
+// QuickChat - minimal ephemeral chat room backend
+// Express serves static files & routes, Socket.io handles real-time messages.
+// All room & message data lives only in memory and is wiped on restart (that's the point).
 
 const express = require("express");
 const http = require("http");
@@ -10,11 +10,15 @@ const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+
+// Bump payload limit so base64-encoded images fit through the socket
+const io = new Server(server, {
+  maxHttpBufferSize: 6 * 1024 * 1024, // 6MB
+});
 
 const PORT = process.env.PORT || 3000;
 
-// ---------- 内存中的房间数据 ----------
+// ---------- In-memory room data ----------
 // rooms = {
 //   "78492": {
 //     users: { socketId: nickname },
@@ -23,7 +27,10 @@ const PORT = process.env.PORT || 3000;
 // }
 const rooms = {};
 
-// 房间不活跃超过 6 小时自动清理（防止内存无限增长）
+// Images are base64 data URLs; cap the raw string length (~4MB file -> ~5.4MB base64)
+const MAX_IMAGE_DATA_URL_LENGTH = 5.5 * 1024 * 1024;
+
+// Auto-clean rooms that have been empty for more than 6 hours (prevents unbounded memory growth)
 const ROOM_TTL_MS = 6 * 60 * 60 * 1000;
 setInterval(() => {
   const now = Date.now();
@@ -47,44 +54,44 @@ function generateNickname() {
   return `User-${num}`;
 }
 
-// ---------- 静态文件 ----------
+// ---------- Static files ----------
 app.use(express.static(path.join(__dirname, "public")));
 
-// 创建房间的 REST 接口（首页"创建新聊天"调用）
+// Create-room REST endpoint (called by the "Start a new chat" button)
 app.get("/api/create-room", (req, res) => {
   const code = generateRoomCode();
   rooms[code] = { users: {}, createdAt: Date.now() };
   res.json({ roomCode: code });
 });
 
-// 检查房间是否存在
+// Check whether a room exists
 app.get("/api/room/:code", (req, res) => {
   const code = req.params.code;
   res.json({ exists: !!rooms[code] });
 });
 
-// 聊天室页面路由：/chat/78492
+// Chat room page route: /chat/78492
 app.get("/chat/:code", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "chat.html"));
 });
 
-// 首页
+// Home page
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-// ---------- Socket.io 实时通信 ----------
+// ---------- Socket.io real-time communication ----------
 io.on("connection", (socket) => {
   let currentRoom = null;
   let nickname = null;
 
   socket.on("join-room", ({ roomCode }) => {
     if (!/^\d{5}$/.test(roomCode)) {
-      socket.emit("join-error", { message: "房间不存在或已结束" });
+      socket.emit("join-error", { message: "Room not found or has ended" });
       return;
     }
 
-    // 允许"加入"时房间不存在则自动创建（保证直接访问 /chat/xxxxx 链接也能用）
+    // Auto-create the room if it doesn't exist yet, so a direct /chat/xxxxx link still works
     if (!rooms[roomCode]) {
       rooms[roomCode] = { users: {}, createdAt: Date.now() };
     }
@@ -101,20 +108,34 @@ io.on("connection", (socket) => {
       onlineCount: Object.keys(rooms[roomCode].users).length,
     });
 
-    // 通知房间内其他人
+    // Notify everyone else in the room
     socket.to(roomCode).emit("system-message", {
-      text: `${nickname} 加入了聊天`,
+      text: `${nickname} joined the chat`,
       onlineCount: Object.keys(rooms[roomCode].users).length,
     });
   });
 
-  socket.on("send-message", ({ text }) => {
+  socket.on("send-message", ({ text, image }) => {
     if (!currentRoom || !nickname) return;
-    const trimmed = (text || "").toString().trim().slice(0, 2000);
-    if (!trimmed) return;
+
+    const trimmedText = (text || "").toString().trim().slice(0, 2000);
+
+    let safeImage = null;
+    if (image) {
+      if (typeof image !== "string" || !image.startsWith("data:image/")) {
+        socket.emit("image-error", { message: "Invalid image format" });
+      } else if (image.length > MAX_IMAGE_DATA_URL_LENGTH) {
+        socket.emit("image-error", { message: "Image is too large" });
+      } else {
+        safeImage = image;
+      }
+    }
+
+    if (!trimmedText && !safeImage) return;
 
     io.to(currentRoom).emit("chat-message", {
-      text: trimmed,
+      text: trimmedText,
+      image: safeImage,
       sender: nickname,
       senderId: socket.id,
       time: Date.now(),
@@ -125,11 +146,11 @@ io.on("connection", (socket) => {
     if (currentRoom && rooms[currentRoom]) {
       delete rooms[currentRoom].users[socket.id];
       socket.to(currentRoom).emit("system-message", {
-        text: `${nickname} 离开了聊天`,
+        text: `${nickname} left the chat`,
         onlineCount: Object.keys(rooms[currentRoom].users).length,
       });
 
-      // 房间空了就清理
+      // Reset the empty-room timer for TTL cleanup
       if (Object.keys(rooms[currentRoom].users).length === 0) {
         rooms[currentRoom].createdAt = Date.now();
       }
